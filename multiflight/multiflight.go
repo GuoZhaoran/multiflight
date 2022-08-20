@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
-	"log"
 	"runtime"
 	"runtime/debug"
 	"sync"
@@ -103,7 +102,7 @@ func NewGroup(cap, period uint32, commitFunc func([]string)(map[string]interface
 	return group
 }
 
-// Do : 向multiplied Flight中注册事件, 注册的事件需要 Wait 返回结果的通知
+// Do : 向multi flight中注册事件, 注册的事件需要等待返回结果的通知
 func (g *Group) Do(key string) (v interface{}, err error, empty, shared bool) {
 	g.mu.Lock()
 	if g.m == nil {
@@ -126,7 +125,7 @@ func (g *Group) Do(key string) (v interface{}, err error, empty, shared bool) {
 	g.m[key] = c
 	// 将当前key添加到组中, 后续检查满足条件可进行组提交
 	curNumberId, isFull, isFirst := g.addToPool(key)
-	log.Printf("multi request curNumberId: %d, isFull:%v, isFirst:%v", curNumberId, isFull, isFirst)
+	//log.Printf("multi request curNumberId: %d, isFull:%v, isFirst:%v", curNumberId, isFull, isFirst)
 	g.mu.Unlock()
 	// 满了, 直接进行组提交就可以
 	if isFull {
@@ -231,9 +230,6 @@ func (g *Group) doCall(taskParams []string) {
 		if !normalReturn && !recovered {
 			err = errGoexit
 		}
-		for _, key := range taskParams {
-			g.m[key].wg.Done()
-		}
 
 		g.mu.Lock()
 		defer g.mu.Unlock()
@@ -241,6 +237,10 @@ func (g *Group) doCall(taskParams []string) {
 		// 循环遍历释放请求, 因为大家已经都都拿到了自己的资源
 		for _, key := range taskParams {
 			c := g.m[key]
+			val, exist := ret[key]
+			c.err, c.val, c.empty = err, val, !exist
+			c.wg.Done()
+
 			// 将c从数组中移除
 			delete(g.m, key)
 
@@ -281,11 +281,6 @@ func (g *Group) doCall(taskParams []string) {
 		}()
 
 		ret, err = g.CommitFunc(taskParams)
-		for _, key := range taskParams {
-			c := g.m[key]
-			val, exist := ret[key]
-			c.err, c.val, c.empty = err, val, !exist
-		}
 		normalReturn = true
 	}()
 

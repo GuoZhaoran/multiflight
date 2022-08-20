@@ -2,8 +2,11 @@ package main
 
 import (
 	"concurrent/multiflight"
+	"context"
 	"fmt"
+	"golang.org/x/sync/singleflight"
 	"log"
+	"math/rand"
 	"strconv"
 	"sync"
 	"time"
@@ -15,49 +18,53 @@ func MultiGetDataFromDb(keys []string)(map[string]interface{}, error) {
 		log.Println("db multi query end")
 	}()
 
-	log.Println("db multi query begin")
+	// 请求计数
+	log.Println("db multi query begin, task key num:" + strconv.Itoa(len(keys)))
 	result := make(map[string]interface{})
 	for _, key := range keys {
 		result[key] = "data_mock_" + key
 	}
-	// 假如接口50ms返回
-	time.Sleep(50 * time.Millisecond)
+	// 假如接口10ms返回
+	time.Sleep(10 * time.Millisecond)
 
 	return result, nil
 }
 
-func main() {
-	multiFlight := multiflight.NewGroup(50, 5, MultiGetDataFromDb)
+func RegisterCommitFuncToMultiflight(ctx context.Context, multiflight *multiflight.Group, keys []string) error {
+	multiflight.CommitFunc = func(keys []string)(map[string]interface{}, error) {
+		result := make(chan map[string]interface{})
 
-	getData := func(requestID int, key string)(string, error) {
-		log.Printf("request %v start request ...", requestID)
-
-		// 合并请求
-		value, _, _, _ := multiFlight.Do(key)
-		//ch := multiFlight.DoChan(key)
-		//result := <- ch
-
-		return value.(string), nil
+		select {
+		case r := <-result:
+			return r, nil
+		case <-ctx.Done():
+			return map[string]interface{}{}, ctx.Err()
+		}
 	}
+
+	return nil
+}
+
+func main() {
+	// 创建一个组容量16, 任务提交周期为5ms的multiFlight
+	multiFlight := multiflight.NewGroup(16, 5, MultiGetDataFromDb)
 
 	var wg sync.WaitGroup
 	keyPrefix := "order_id_"
-	wg.Add(10000)
-	for i := 0; i < 10000; i++ {
-		// 每生成1000个key休息1s, 观察
-		if i % 1000 == 0 {
-			time.Sleep(1 * time.Second)
+	wg.Add(50)
+	for i := 0; i < 50; i++ {
+		// 每个请求有30%的机会能够睡眠1ms
+		randN := rand.Intn(10)
+		if randN < 3 {
+			time.Sleep(1 * time.Millisecond)
 		}
+
 		go func(wg *sync.WaitGroup, requestID int) {
 			defer wg.Done()
 
-			// 生成8种个不同的key (每组50个或过了5ms超时时间自动组提交)
-			orderIndex := strconv.Itoa(requestID & 7)
-
-			// 生成128种不同的key
-			//orderIndex := strconv.Itoa(requestID & 127)
-			key := keyPrefix + orderIndex
-			value, _ := getData(requestID, key)
+			// 生成不同的key
+			key := keyPrefix +strconv.Itoa(requestID)
+			value, _, _, _ := multiFlight.Do(key)
 			log.Printf("request %v, params key %v, get value: %v", requestID, key, value)
 		}(&wg, i)
 	}
